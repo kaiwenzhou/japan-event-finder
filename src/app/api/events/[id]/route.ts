@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { getEventById } from "@/lib/db";
+import { getEventByIdAsync } from "@/lib/db";
 
 export async function GET(
   request: NextRequest,
@@ -7,7 +7,7 @@ export async function GET(
 ) {
   try {
     const { id } = await params;
-    const event = getEventById(id);
+    const event = await getEventByIdAsync(id);
 
     if (!event) {
       return NextResponse.json(

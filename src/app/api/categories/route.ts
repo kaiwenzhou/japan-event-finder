@@ -1,9 +1,9 @@
 import { NextResponse } from "next/server";
-import { getCategories } from "@/lib/db";
+import { getCategoriesAsync } from "@/lib/db";
 
 export async function GET() {
   try {
-    const categories = getCategories();
+    const categories = await getCategoriesAsync();
     return NextResponse.json({ categories });
   } catch (error) {
     console.error("Error fetching categories:", error);

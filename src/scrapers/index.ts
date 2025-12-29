@@ -5,7 +5,7 @@ import { JapanTravelScraper } from "./japan-travel";
 import { TicketPiaScraper } from "./ticket-pia";
 import { KabukiBitoScraper } from "./kabuki-bito";
 import { TokyoArtBeatScraper } from "./tokyo-art-beat";
-import { upsertEvent } from "@/lib/db";
+import { upsertEventAsync } from "@/lib/db";
 
 export type { ScraperResult, ScrapedEvent };
 export { BaseScraper };
@@ -57,7 +57,7 @@ export async function runAllScrapers(options?: {
       if (saveToDb && result.events.length > 0) {
         for (const event of result.events) {
           try {
-            upsertEvent(event);
+            await upsertEventAsync(event);
           } catch (error) {
             console.error(`  Error saving event ${event.id}:`, error);
             totalErrors++;
@@ -107,7 +107,7 @@ export async function runScraper(scraperName: string, saveToDb = true): Promise<
   if (saveToDb && result.events.length > 0) {
     for (const event of result.events) {
       try {
-        upsertEvent(event);
+        await upsertEventAsync(event);
       } catch (error) {
         result.errors.push(`Error saving event ${event.id}: ${error}`);
       }
