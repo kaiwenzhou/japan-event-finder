@@ -1,55 +1,26 @@
 /**
  * Database module supporting both:
  * - SQLite (local development via better-sqlite3)
- * - Turso/LibSQL (production via @libsql/client)
+ * - Supabase (production via @supabase/supabase-js)
  *
- * Set TURSO_DATABASE_URL and TURSO_AUTH_TOKEN for production.
+ * Set NEXT_PUBLIC_SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY for production.
  * Falls back to local SQLite if not set.
  */
 
 import Database from "better-sqlite3";
-import { createClient, Client } from "@libsql/client";
+import { createClient, SupabaseClient } from "@supabase/supabase-js";
 import path from "path";
 
 const DB_PATH = path.join(process.cwd(), "data", "events.db");
 
 // Database mode detection
-const useTurso = !!(process.env.TURSO_DATABASE_URL && process.env.TURSO_AUTH_TOKEN);
+const useSupabase = !!(
+  process.env.NEXT_PUBLIC_SUPABASE_URL &&
+  process.env.SUPABASE_SERVICE_ROLE_KEY
+);
 
 let sqliteDb: Database.Database | null = null;
-let tursoClient: Client | null = null;
-
-// Initialize schema SQL
-const SCHEMA_SQL = `
-  CREATE TABLE IF NOT EXISTS events (
-    id TEXT PRIMARY KEY,
-    title_ja TEXT NOT NULL,
-    title_en TEXT,
-    description_ja TEXT,
-    description_en TEXT,
-    date_start TEXT NOT NULL,
-    date_end TEXT,
-    venue_name TEXT NOT NULL,
-    venue_address TEXT,
-    area TEXT NOT NULL,
-    category TEXT NOT NULL,
-    tags TEXT,
-    price_min INTEGER,
-    price_max INTEGER,
-    source_url TEXT NOT NULL,
-    source_name TEXT NOT NULL,
-    image_url TEXT,
-    created_at TEXT DEFAULT (datetime('now')),
-    updated_at TEXT DEFAULT (datetime('now'))
-  )
-`;
-
-const INDEXES_SQL = [
-  "CREATE INDEX IF NOT EXISTS idx_events_date_start ON events(date_start)",
-  "CREATE INDEX IF NOT EXISTS idx_events_area ON events(area)",
-  "CREATE INDEX IF NOT EXISTS idx_events_category ON events(category)",
-  "CREATE INDEX IF NOT EXISTS idx_events_source ON events(source_name)",
-];
+let supabaseClient: SupabaseClient | null = null;
 
 // SQLite initialization
 function initSqlite(): Database.Database {
@@ -63,28 +34,51 @@ function initSqlite(): Database.Database {
 
   sqliteDb = new Database(DB_PATH);
   sqliteDb.pragma("journal_mode = WAL");
-  sqliteDb.exec(SCHEMA_SQL);
-  INDEXES_SQL.forEach((sql) => sqliteDb!.exec(sql));
+
+  // Create table
+  sqliteDb.exec(`
+    CREATE TABLE IF NOT EXISTS events (
+      id TEXT PRIMARY KEY,
+      title_ja TEXT NOT NULL,
+      title_en TEXT,
+      description_ja TEXT,
+      description_en TEXT,
+      date_start TEXT NOT NULL,
+      date_end TEXT,
+      venue_name TEXT NOT NULL,
+      venue_address TEXT,
+      area TEXT NOT NULL,
+      category TEXT NOT NULL,
+      tags TEXT,
+      price_min INTEGER,
+      price_max INTEGER,
+      source_url TEXT NOT NULL,
+      source_name TEXT NOT NULL,
+      image_url TEXT,
+      created_at TEXT DEFAULT (datetime('now')),
+      updated_at TEXT DEFAULT (datetime('now'))
+    )
+  `);
+
+  // Create indexes
+  sqliteDb.exec("CREATE INDEX IF NOT EXISTS idx_events_date_start ON events(date_start)");
+  sqliteDb.exec("CREATE INDEX IF NOT EXISTS idx_events_area ON events(area)");
+  sqliteDb.exec("CREATE INDEX IF NOT EXISTS idx_events_category ON events(category)");
+  sqliteDb.exec("CREATE INDEX IF NOT EXISTS idx_events_source ON events(source_name)");
 
   return sqliteDb;
 }
 
-// Turso initialization
-async function initTurso(): Promise<Client> {
-  if (tursoClient) return tursoClient;
+// Supabase initialization
+function getSupabase(): SupabaseClient {
+  if (supabaseClient) return supabaseClient;
 
-  tursoClient = createClient({
-    url: process.env.TURSO_DATABASE_URL!,
-    authToken: process.env.TURSO_AUTH_TOKEN!,
-  });
+  supabaseClient = createClient(
+    process.env.NEXT_PUBLIC_SUPABASE_URL!,
+    process.env.SUPABASE_SERVICE_ROLE_KEY!
+  );
 
-  // Initialize schema
-  await tursoClient.execute(SCHEMA_SQL);
-  for (const sql of INDEXES_SQL) {
-    await tursoClient.execute(sql);
-  }
-
-  return tursoClient;
+  return supabaseClient;
 }
 
 // Types
@@ -121,8 +115,8 @@ export interface EventFilters {
   limit?: number;
 }
 
-// Helper to parse row to Event
-function parseEvent(row: Record<string, unknown>): Event {
+// Helper to parse SQLite row to Event
+function parseEventFromSqlite(row: Record<string, unknown>): Event {
   return {
     ...(row as unknown as Omit<Event, "tags">),
     tags: row.tags ? JSON.parse(row.tags as string) : null,
@@ -178,14 +172,14 @@ function getEventsSqlite(filters: EventFilters): { events: Event[]; total: numbe
   `);
   const rows = stmt.all({ ...params, limit, offset }) as Record<string, unknown>[];
 
-  return { events: rows.map(parseEvent), total };
+  return { events: rows.map(parseEventFromSqlite), total };
 }
 
 function getEventByIdSqlite(id: string): Event | null {
   const db = initSqlite();
   const stmt = db.prepare("SELECT * FROM events WHERE id = ?");
   const row = stmt.get(id) as Record<string, unknown> | undefined;
-  return row ? parseEvent(row) : null;
+  return row ? parseEventFromSqlite(row) : null;
 }
 
 function upsertEventSqlite(event: Omit<Event, "created_at" | "updated_at">): void {
@@ -231,213 +225,215 @@ function getSourcesSqlite(): string[] {
   return rows.map((r) => r.source_name);
 }
 
-// ============ Turso implementations ============
+// ============ Supabase implementations ============
 
-async function getEventsTurso(filters: EventFilters): Promise<{ events: Event[]; total: number }> {
-  const client = await initTurso();
+async function getEventsSupabase(filters: EventFilters): Promise<{ events: Event[]; total: number }> {
+  const supabase = getSupabase();
   const { startDate, endDate, area, category, search, source, page = 1, limit = 20 } = filters;
-
-  const conditions: string[] = [];
-  const args: (string | number)[] = [];
-
-  if (startDate) {
-    conditions.push("date_start >= ?");
-    args.push(startDate);
-  }
-  if (endDate) {
-    conditions.push("(date_end <= ? OR (date_end IS NULL AND date_start <= ?))");
-    args.push(endDate, endDate);
-  }
-  if (area) {
-    conditions.push("LOWER(area) = LOWER(?)");
-    args.push(area);
-  }
-  if (category) {
-    conditions.push("LOWER(category) = LOWER(?)");
-    args.push(category);
-  }
-  if (source) {
-    conditions.push("LOWER(source_name) = LOWER(?)");
-    args.push(source);
-  }
-  if (search) {
-    conditions.push(
-      "(title_ja LIKE ? OR title_en LIKE ? OR description_ja LIKE ? OR description_en LIKE ?)"
-    );
-    const searchPattern = `%${search}%`;
-    args.push(searchPattern, searchPattern, searchPattern, searchPattern);
-  }
-
-  const whereClause = conditions.length > 0 ? `WHERE ${conditions.join(" AND ")}` : "";
   const offset = (page - 1) * limit;
 
-  const countResult = await client.execute({
-    sql: `SELECT COUNT(*) as count FROM events ${whereClause}`,
-    args,
-  });
-  const total = Number(countResult.rows[0]?.count ?? 0);
+  let query = supabase.from("events").select("*", { count: "exact" });
 
-  const result = await client.execute({
-    sql: `SELECT * FROM events ${whereClause} ORDER BY date_start ASC LIMIT ? OFFSET ?`,
-    args: [...args, limit, offset],
-  });
+  if (startDate) {
+    query = query.gte("date_start", startDate);
+  }
+  if (endDate) {
+    query = query.or(`date_end.lte.${endDate},and(date_end.is.null,date_start.lte.${endDate})`);
+  }
+  if (area) {
+    query = query.ilike("area", area);
+  }
+  if (category) {
+    query = query.ilike("category", category);
+  }
+  if (source) {
+    query = query.ilike("source_name", source);
+  }
+  if (search) {
+    query = query.or(
+      `title_ja.ilike.%${search}%,title_en.ilike.%${search}%,description_ja.ilike.%${search}%,description_en.ilike.%${search}%`
+    );
+  }
 
-  const events = result.rows.map((row) => parseEvent(row as unknown as Record<string, unknown>));
-  return { events, total };
+  const { data, count, error } = await query
+    .order("date_start", { ascending: true })
+    .range(offset, offset + limit - 1);
+
+  if (error) {
+    console.error("Supabase error:", error);
+    throw error;
+  }
+
+  return {
+    events: (data || []) as Event[],
+    total: count || 0,
+  };
 }
 
-async function getEventByIdTurso(id: string): Promise<Event | null> {
-  const client = await initTurso();
-  const result = await client.execute({
-    sql: "SELECT * FROM events WHERE id = ?",
-    args: [id],
-  });
-  const row = result.rows[0];
-  return row ? parseEvent(row as unknown as Record<string, unknown>) : null;
+async function getEventByIdSupabase(id: string): Promise<Event | null> {
+  const supabase = getSupabase();
+  const { data, error } = await supabase
+    .from("events")
+    .select("*")
+    .eq("id", id)
+    .single();
+
+  if (error) {
+    if (error.code === "PGRST116") return null; // Not found
+    throw error;
+  }
+
+  return data as Event;
 }
 
-async function upsertEventTurso(event: Omit<Event, "created_at" | "updated_at">): Promise<void> {
-  const client = await initTurso();
-  await client.execute({
-    sql: `
-      INSERT INTO events (
-        id, title_ja, title_en, description_ja, description_en,
-        date_start, date_end, venue_name, venue_address, area,
-        category, tags, price_min, price_max, source_url, source_name, image_url
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-      ON CONFLICT(id) DO UPDATE SET
-        title_ja = excluded.title_ja, title_en = excluded.title_en,
-        description_ja = excluded.description_ja, description_en = excluded.description_en,
-        date_start = excluded.date_start, date_end = excluded.date_end,
-        venue_name = excluded.venue_name, venue_address = excluded.venue_address,
-        area = excluded.area, category = excluded.category, tags = excluded.tags,
-        price_min = excluded.price_min, price_max = excluded.price_max,
-        source_url = excluded.source_url, source_name = excluded.source_name,
-        image_url = excluded.image_url, updated_at = datetime('now')
-    `,
-    args: [
-      event.id, event.title_ja, event.title_en, event.description_ja, event.description_en,
-      event.date_start, event.date_end, event.venue_name, event.venue_address, event.area,
-      event.category, event.tags ? JSON.stringify(event.tags) : null,
-      event.price_min, event.price_max, event.source_url, event.source_name, event.image_url,
-    ],
-  });
+async function upsertEventSupabase(event: Omit<Event, "created_at" | "updated_at">): Promise<void> {
+  const supabase = getSupabase();
+  const { error } = await supabase
+    .from("events")
+    .upsert({
+      ...event,
+      updated_at: new Date().toISOString(),
+    });
+
+  if (error) {
+    console.error("Supabase upsert error:", error);
+    throw error;
+  }
 }
 
-async function getCategoriesTurso(): Promise<string[]> {
-  const client = await initTurso();
-  const result = await client.execute("SELECT DISTINCT category FROM events ORDER BY category");
-  return result.rows.map((r) => r.category as string);
+async function getCategoriesSupabase(): Promise<string[]> {
+  const supabase = getSupabase();
+  const { data, error } = await supabase
+    .from("events")
+    .select("category")
+    .order("category");
+
+  if (error) throw error;
+
+  // Get unique categories
+  const categories = [...new Set((data || []).map((r) => r.category))];
+  return categories;
 }
 
-async function getAreasTurso(): Promise<string[]> {
-  const client = await initTurso();
-  const result = await client.execute("SELECT DISTINCT area FROM events ORDER BY area");
-  return result.rows.map((r) => r.area as string);
+async function getAreasSupabase(): Promise<string[]> {
+  const supabase = getSupabase();
+  const { data, error } = await supabase
+    .from("events")
+    .select("area")
+    .order("area");
+
+  if (error) throw error;
+
+  const areas = [...new Set((data || []).map((r) => r.area))];
+  return areas;
 }
 
-async function getSourcesTurso(): Promise<string[]> {
-  const client = await initTurso();
-  const result = await client.execute("SELECT DISTINCT source_name FROM events ORDER BY source_name");
-  return result.rows.map((r) => r.source_name as string);
+async function getSourcesSupabase(): Promise<string[]> {
+  const supabase = getSupabase();
+  const { data, error } = await supabase
+    .from("events")
+    .select("source_name")
+    .order("source_name");
+
+  if (error) throw error;
+
+  const sources = [...new Set((data || []).map((r) => r.source_name))];
+  return sources;
 }
 
-// ============ Exported functions (sync for SQLite, async wrappers) ============
+// ============ Exported functions ============
 
-// For backward compatibility, these are synchronous when using SQLite
-// They return the result directly or throw if async is needed
-
+// Sync versions (SQLite only, for scripts)
 export function getEvents(filters: EventFilters = {}): { events: Event[]; total: number } {
-  if (useTurso) {
-    throw new Error("Use getEventsAsync() in production with Turso");
+  if (useSupabase) {
+    throw new Error("Use getEventsAsync() in production with Supabase");
   }
   return getEventsSqlite(filters);
 }
 
 export function getEventById(id: string): Event | null {
-  if (useTurso) {
-    throw new Error("Use getEventByIdAsync() in production with Turso");
+  if (useSupabase) {
+    throw new Error("Use getEventByIdAsync() in production with Supabase");
   }
   return getEventByIdSqlite(id);
 }
 
 export function upsertEvent(event: Omit<Event, "created_at" | "updated_at">): void {
-  if (useTurso) {
-    throw new Error("Use upsertEventAsync() in production with Turso");
+  if (useSupabase) {
+    throw new Error("Use upsertEventAsync() in production with Supabase");
   }
   upsertEventSqlite(event);
 }
 
 export function getCategories(): string[] {
-  if (useTurso) {
-    throw new Error("Use getCategoriesAsync() in production with Turso");
+  if (useSupabase) {
+    throw new Error("Use getCategoriesAsync() in production with Supabase");
   }
   return getCategoriesSqlite();
 }
 
 export function getAreas(): string[] {
-  if (useTurso) {
-    throw new Error("Use getAreasAsync() in production with Turso");
+  if (useSupabase) {
+    throw new Error("Use getAreasAsync() in production with Supabase");
   }
   return getAreasSqlite();
 }
 
 export function getSources(): string[] {
-  if (useTurso) {
-    throw new Error("Use getSourcesAsync() in production with Turso");
+  if (useSupabase) {
+    throw new Error("Use getSourcesAsync() in production with Supabase");
   }
   return getSourcesSqlite();
 }
 
-// Async versions that work with both SQLite and Turso
+// Async versions (work with both SQLite and Supabase)
 export async function getEventsAsync(filters: EventFilters = {}): Promise<{ events: Event[]; total: number }> {
-  if (useTurso) {
-    return getEventsTurso(filters);
+  if (useSupabase) {
+    return getEventsSupabase(filters);
   }
   return getEventsSqlite(filters);
 }
 
 export async function getEventByIdAsync(id: string): Promise<Event | null> {
-  if (useTurso) {
-    return getEventByIdTurso(id);
+  if (useSupabase) {
+    return getEventByIdSupabase(id);
   }
   return getEventByIdSqlite(id);
 }
 
 export async function upsertEventAsync(event: Omit<Event, "created_at" | "updated_at">): Promise<void> {
-  if (useTurso) {
-    return upsertEventTurso(event);
+  if (useSupabase) {
+    return upsertEventSupabase(event);
   }
   upsertEventSqlite(event);
 }
 
 export async function getCategoriesAsync(): Promise<string[]> {
-  if (useTurso) {
-    return getCategoriesTurso();
+  if (useSupabase) {
+    return getCategoriesSupabase();
   }
   return getCategoriesSqlite();
 }
 
 export async function getAreasAsync(): Promise<string[]> {
-  if (useTurso) {
-    return getAreasTurso();
+  if (useSupabase) {
+    return getAreasSupabase();
   }
   return getAreasSqlite();
 }
 
 export async function getSourcesAsync(): Promise<string[]> {
-  if (useTurso) {
-    return getSourcesTurso();
+  if (useSupabase) {
+    return getSourcesSupabase();
   }
   return getSourcesSqlite();
 }
 
-// Export the database mode for debugging
-export function getDatabaseMode(): "sqlite" | "turso" {
-  return useTurso ? "turso" : "sqlite";
+// Utility exports
+export function getDatabaseMode(): "sqlite" | "supabase" {
+  return useSupabase ? "supabase" : "sqlite";
 }
 
-// For local SQLite access (scripts, etc.)
 export function getDb(): Database.Database {
   return initSqlite();
 }
