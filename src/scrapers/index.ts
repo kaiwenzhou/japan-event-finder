@@ -5,6 +5,9 @@ import { JapanTravelScraper } from "./japan-travel";
 import { TicketPiaScraper } from "./ticket-pia";
 import { KabukiBitoScraper } from "./kabuki-bito";
 import { TokyoArtBeatScraper } from "./tokyo-art-beat";
+import { NHKSymphonyScraper } from "./nhk-symphony";
+import { BillboardLiveScraper } from "./billboard-live";
+import { ParcoScraper } from "./parco";
 import { upsertEventAsync } from "@/lib/db";
 
 export type { ScraperResult, ScrapedEvent };
@@ -17,6 +20,9 @@ export const scrapers: BaseScraper[] = [
   new TicketPiaScraper(),
   new KabukiBitoScraper(),
   new TokyoArtBeatScraper(),
+  new NHKSymphonyScraper(),
+  new BillboardLiveScraper(),
+  new ParcoScraper(),
 ];
 
 export interface RunAllResult {
